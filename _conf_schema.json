@@ -1,0 +1,44 @@
+{
+    "net_iface": {
+        "description": "网卡名称",
+        "type": "string",
+        "hint": "例如 eth0 / ens3，需与 /proc/net/dev 中一致。",
+        "default": ""
+    },
+    "net_server": {
+        "description": "远程 VPS 地址",
+        "type": "string",
+        "hint": "留空表示读取本机网卡流量。",
+        "default": ""
+    },
+    "net_reset_day": {
+        "description": "每月重置日",
+        "type": "int",
+        "hint": "每月在该日 23:59 重置流量基线。",
+        "default": 6
+    },
+    "ssh_user": {
+        "description": "SSH 用户名",
+        "type": "string",
+        "hint": "远程读取时使用，默认 root。",
+        "default": "root"
+    },
+    "ssh_port": {
+        "description": "SSH 端口",
+        "type": "int",
+        "hint": "远程读取时使用，默认 22。",
+        "default": 22
+    },
+    "ssh_key_path": {
+        "description": "SSH 私钥路径",
+        "type": "string",
+        "hint": "默认为 data/id_rsa。",
+        "default": "data/id_rsa"
+    },
+    "total_gb": {
+        "description": "订阅总流量 (GB)",
+        "type": "float",
+        "hint": "用于生成 subscription_userinfo.json 的 total 字段。",
+        "default": 1024
+    }
+}
