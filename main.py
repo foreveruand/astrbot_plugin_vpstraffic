@@ -186,8 +186,8 @@ class VPSTrafficPlugin(Star):
         except Exception:
             return
         
-    @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("vps")
+    @filter.permission_type(filter.PermissionType.ADMIN)
     async def vps_command(self, event: AstrMessageEvent):
         try:
             data = self._load_data()
