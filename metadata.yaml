@@ -3,4 +3,4 @@ display_name: VPS 流量查询
 desc: 通过 SSH 获取 VPS 网卡流量统计，并生成订阅信息文件。
 version: v1.0.0
 author: migration
-repo: ""
+repo: "https://github.com/foreveruand/astrbot_plugin_vpstraffic"
