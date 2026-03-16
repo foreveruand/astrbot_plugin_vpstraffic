@@ -10,7 +10,6 @@ import psutil
 
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star
-from astrbot.core.utils import path_utils
 from astrbot.api import AstrBotConfig
 from astrbot.core.utils.astrbot_path import get_astrbot_plugin_data_path
 
@@ -117,7 +116,7 @@ class VPSTrafficPlugin(Star):
             return self._get_local_traffic()
 
         self.ssh_key_path=Path(
-            path_utils.get_plugin_data_dir("astrbot_plugin_vpstraffic"), self.config.get("ssh_key_path", [])[0]
+            get_astrbot_plugin_data_path(), "astrbot_plugin_vpstraffic", self.config.get("ssh_key_path", [])[0]
         )
         ssh = paramiko.SSHClient()
         ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
