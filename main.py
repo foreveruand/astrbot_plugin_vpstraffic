@@ -11,7 +11,8 @@ import psutil
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star
 from astrbot.core.utils import path_utils
-
+from astrbot.api import AstrBotConfig
+from astrbot.core.utils.astrbot_path import get_astrbot_plugin_data_path
 
 class VPSTrafficPlugin(Star):
     """VPS traffic query plugin migrated from nonebot.
@@ -20,10 +21,9 @@ class VPSTrafficPlugin(Star):
     - /vps
     """
 
-    def __init__(self, context: Context, config: dict | None = None) -> None:
-        super().__init__(context, config)
-        config = config or {}
-
+    def __init__(self, context: Context, config: AstrBotConfig) -> None:
+        self.config = config
+        self.context = context
         self.net_iface = str(config.get("net_iface", ""))
         self.net_server = str(config.get("net_server", ""))
         self.net_reset_day = int(config.get("net_reset_day", 6))
@@ -31,13 +31,10 @@ class VPSTrafficPlugin(Star):
         self.ssh_port = int(config.get("ssh_port", 22))
         self.total_gb = float(config.get("total_gb", 1024))
 
-        data_dir = path_utils.get_data_dir()
-        plugin_data_dir = path_utils.get_plugin_data_dir("vpstraffic")
+        plugin_data_dir = Path(get_astrbot_plugin_data_path()) / "astrbot_plugin_vpstraffic"
         plugin_data_dir.mkdir(parents=True, exist_ok=True)
 
-        self.ssh_key_path = Path(
-            config.get("ssh_key_path", str(data_dir / "id_rsa"))
-        )
+        self.ssh_key_path = None
         self.data_file = plugin_data_dir / "vps_traffic.json"
         self.sub_info_file = plugin_data_dir / "subscription_userinfo.json"
 
@@ -48,9 +45,7 @@ class VPSTrafficPlugin(Star):
         await self._ensure_cron_jobs()
 
     async def _ensure_cron_jobs(self) -> None:
-        cron = getattr(self.context, "cron_manager", None)
-        if cron is None:
-            return
+        cron = self.context.cron_manager
 
         existing = await cron.list_jobs("basic")
         for job in existing:
@@ -117,9 +112,13 @@ class VPSTrafficPlugin(Star):
         return rx_gb, tx_gb
 
     def _get_remote_traffic_sync(self) -> tuple[float, float]:
-        if not self.net_server:
+        self.ssh_key_path = self.config.get("ssh_key_path")
+        if not self.net_server or not self.ssh_key_path:
             return self._get_local_traffic()
 
+        self.ssh_key_path=Path(
+            path_utils.get_plugin_data_dir("astrbot_plugin_vpstraffic"), self.config.get("ssh_key_path", [])[0]
+        )
         ssh = paramiko.SSHClient()
         ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         ssh.connect(

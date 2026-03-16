@@ -30,10 +30,11 @@
         "default": 22
     },
     "ssh_key_path": {
-        "description": "SSH 私钥路径",
-        "type": "string",
-        "hint": "默认为 data/id_rsa。",
-        "default": "data/id_rsa"
+        "description": "SSH 私钥",
+        "type": "file",
+        "hint": "默认为空",
+        "default": [],
+        "file_types": ["key","pem"]
     },
     "total_gb": {
         "description": "订阅总流量 (GB)",
