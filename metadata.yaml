@@ -1,6 +1,6 @@
 name: astrbot_plugin_vpstraffic
 display_name: Xray 用户流量查询
 desc: 通过 Xray Stats API 按 email 统计用户流量。
-version: v2.0.0
+version: v2.1.0
 author: migration
 repo: "https://github.com/foreveruand/astrbot_plugin_vpstraffic"

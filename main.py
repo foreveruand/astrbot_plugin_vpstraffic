@@ -22,6 +22,9 @@ class VPSTrafficPlugin(Star):
         self.xray_ssh_port = int(config.get("xray_ssh_port", 22))
         self.xray_api_address = str(config.get("xray_api_address", "127.0.0.1:10085"))
         self.xray_command = str(config.get("xray_command", "xray"))
+        self.traffic_collect_interval = min(
+            max(int(config.get("traffic_collect_interval", 5)), 1), 59
+        )
         self.net_reset_day = min(max(int(config.get("net_reset_day", 6)), 1), 28)
 
         plugin_data_dir = (
@@ -52,7 +55,7 @@ class VPSTrafficPlugin(Star):
 
         await cron.add_basic_job(
             name=self._collect_job_name,
-            cron_expression="*/5 * * * *",
+            cron_expression=f"*/{self.traffic_collect_interval} * * * *",
             handler=self._collect_traffic,
             description="Collect Xray per-user traffic",
             enabled=True,
@@ -173,36 +176,30 @@ class VPSTrafficPlugin(Star):
         return users
 
     async def _collect_traffic(self) -> None:
-        """Collect traffic since the previous collection into the current ledger."""
+        """Collect and clear Xray counters into the current local ledger."""
         async with self._traffic_lock:
             period_start = self._period_start().isoformat()
             data = self._load_data()
             if data.get("period_start") != period_start:
                 if data.get("period_start"):
                     await self._query_xray_stats(reset=True)
-                    last_counters = {}
+                    users: dict[str, dict[str, int]] = {}
                 else:
-                    last_counters = await self._query_xray_stats(reset=False)
+                    users = await self._query_xray_stats(reset=True)
                 self._save_data(
                     {
                         "period_start": period_start,
-                        "users": {},
-                        "last_counters": last_counters,
+                        "users": users,
                     }
                 )
                 return
 
-            counters = await self._query_xray_stats(reset=False)
+            counters = await self._query_xray_stats(reset=True)
             users = data["users"]
-            last_counters = data.get("last_counters", {})
             for email, traffic in counters.items():
                 usage = users.setdefault(email, {"uplink": 0, "downlink": 0})
-                previous = last_counters.get(email, {})
-                usage["uplink"] += max(0, traffic["uplink"] - previous.get("uplink", 0))
-                usage["downlink"] += max(
-                    0, traffic["downlink"] - previous.get("downlink", 0)
-                )
-            data["last_counters"] = counters
+                usage["uplink"] += traffic["uplink"]
+                usage["downlink"] += traffic["downlink"]
             self._save_data(data)
 
     async def _reset_traffic(self) -> None:
@@ -213,7 +210,6 @@ class VPSTrafficPlugin(Star):
                 {
                     "period_start": self._period_start().isoformat(),
                     "users": {},
-                    "last_counters": {},
                 }
             )
 

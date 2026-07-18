@@ -5,7 +5,7 @@
 ## 功能
 
 - 管理员使用 `/vps` 查看各用户的流量使用情况。
-- AstrBot 定时任务每 5 分钟读取一次 Xray 用户流量并累计。
+- AstrBot 按配置的间隔读取 Xray 用户流量；每次读取后立即清零 Xray 计数器，并在本地累计。
 - 每月重置日的 00:00 清零本地账本和 Xray 用户计数器。
 - 通过 SSH 在 Xray 服务器执行 `xray api statsquery`，因此 Xray API 可以仅监听 `127.0.0.1`。
 
@@ -40,11 +40,12 @@
 - `xray_ssh_port`：SSH 端口，默认 `22`。
 - `xray_api_address`：从 SSH 主机访问的 API 地址，默认 `127.0.0.1:10085`。
 - `xray_command`：SSH 主机上的 Xray 命令或可执行文件路径，默认 `xray`。
+- `traffic_collect_interval`：流量采集间隔（分钟），支持 `1` 至 `59`，默认 `5`。`/vps` 也会立即采集一次。
 - `net_reset_day`：每月清零日，支持 `1` 至 `28`，默认 `6`。
 
 插件所在服务器必须能无交互执行 `ssh dm`。不需要在 AstrBot 服务器安装 Xray、Xray API 的 Python 包或 protobuf 文件。
 
-首次启用时，插件会以当前 Xray 计数器建立基线，因此不会回溯统计启用前的流量，也不会清零现有计数器。
+首次启用时，插件会将当前 Xray 计数器记入当期账本并立即清零计数器。此后流量只保存在本地账本，Xray 服务重启不会造成已采集流量丢失。
 
 ## 数据文件
 

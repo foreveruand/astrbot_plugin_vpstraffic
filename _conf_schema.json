@@ -29,6 +29,12 @@
         "hint": "SSH 主机上 Xray 可执行文件的路径或命令名。",
         "default": "xray"
     },
+    "traffic_collect_interval": {
+        "description": "流量采集间隔（分钟）",
+        "type": "int",
+        "hint": "每隔多少分钟查询并清零一次 Xray 计数器，支持 1 至 59。",
+        "default": 5
+    },
     "net_reset_day": {
         "description": "每月流量重置日",
         "type": "int",
