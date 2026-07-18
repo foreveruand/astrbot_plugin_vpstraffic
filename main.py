@@ -1,210 +1,254 @@
 import asyncio
 import json
-import calendar
+import shlex
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
-import paramiko
-import psutil
-
+from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star
-from astrbot.api import AstrBotConfig
 from astrbot.core.utils.astrbot_path import get_astrbot_plugin_data_path
 
-class VPSTrafficPlugin(Star):
-    """VPS traffic query plugin migrated from nonebot.
 
-    Command:
-    - /vps
-    """
+class VPSTrafficPlugin(Star):
+    """Collect and report Xray per-user traffic through its local API."""
 
     def __init__(self, context: Context, config: AstrBotConfig) -> None:
-        self.config = config
         self.context = context
-        self.net_iface = str(config.get("net_iface", ""))
-        self.net_server = str(config.get("net_server", ""))
-        self.net_reset_day = int(config.get("net_reset_day", 6))
-        self.ssh_user = str(config.get("ssh_user", "root"))
-        self.ssh_port = int(config.get("ssh_port", 22))
-        self.total_gb = float(config.get("total_gb", 1024))
+        self.config = config
+        self.xray_ssh_host = str(config.get("xray_ssh_host", "dm"))
+        self.xray_ssh_user = str(config.get("xray_ssh_user", ""))
+        self.xray_ssh_port = int(config.get("xray_ssh_port", 22))
+        self.xray_api_address = str(config.get("xray_api_address", "127.0.0.1:10085"))
+        self.xray_command = str(config.get("xray_command", "xray"))
+        self.net_reset_day = min(max(int(config.get("net_reset_day", 6)), 1), 28)
 
-        plugin_data_dir = Path(get_astrbot_plugin_data_path()) / "astrbot_plugin_vpstraffic"
+        plugin_data_dir = (
+            Path(get_astrbot_plugin_data_path()) / "astrbot_plugin_vpstraffic"
+        )
         plugin_data_dir.mkdir(parents=True, exist_ok=True)
-
-        self.ssh_key_path = None
-        self.data_file = plugin_data_dir / "vps_traffic.json"
-        self.sub_info_file = plugin_data_dir / "subscription_userinfo.json"
-
+        self.data_file = plugin_data_dir / "xray_user_traffic.json"
+        self._collect_job_name = "vpstraffic_xray_collect"
         self._reset_job_name = "vpstraffic_reset"
-        self._clash_job_name = "vpstraffic_clash_update"
+        self._traffic_lock = asyncio.Lock()
 
     async def initialize(self) -> None:
+        """Register traffic collection and monthly reset jobs."""
         await self._ensure_cron_jobs()
 
     async def _ensure_cron_jobs(self) -> None:
+        """Replace this plugin's non-persistent scheduled jobs."""
         cron = self.context.cron_manager
-
         existing = await cron.list_jobs("basic")
+        job_names = {
+            self._collect_job_name,
+            self._reset_job_name,
+            "vpstraffic_clash_update",
+        }
         for job in existing:
-            if job.name in {self._reset_job_name, self._clash_job_name}:
+            if job.name in job_names:
                 await cron.delete_job(job.job_id)
 
-        reset_expression = f"59 23 {self.net_reset_day} * *"
         await cron.add_basic_job(
-            name=self._reset_job_name,
-            cron_expression=reset_expression,
-            handler=self._reset_job,
-            description="Reset VPS traffic baseline",
+            name=self._collect_job_name,
+            cron_expression="*/5 * * * *",
+            handler=self._collect_traffic,
+            description="Collect Xray per-user traffic",
             enabled=True,
             persistent=False,
         )
-
         await cron.add_basic_job(
-            name=self._clash_job_name,
-            cron_expression="*/5 * * * *",
-            handler=self._update_clash_userinfo,
-            description="Update Clash subscription userinfo",
+            name=self._reset_job_name,
+            cron_expression=f"0 0 {self.net_reset_day} * *",
+            handler=self._reset_traffic,
+            description="Reset Xray per-user traffic",
             enabled=True,
             persistent=False,
         )
 
     def _load_data(self) -> dict[str, Any]:
+        """Load the current accounting period and per-email usage ledger."""
         if self.data_file.exists():
             try:
-                return json.loads(self.data_file.read_text(encoding="utf-8"))
-            except Exception:
-                pass
-        return {"base_rx": 0.0, "base_tx": 0.0, "last_month": None}
+                data = json.loads(self.data_file.read_text(encoding="utf-8"))
+                if isinstance(data, dict) and isinstance(data.get("users"), dict):
+                    return data
+            except (OSError, json.JSONDecodeError):
+                logger.warning(
+                    "Failed to read Xray traffic data from %s", self.data_file
+                )
+        return {"period_start": "", "users": {}, "last_counters": {}}
 
     def _save_data(self, data: dict[str, Any]) -> None:
-        self.data_file.write_text(json.dumps(data), encoding="utf-8")
+        """Persist the current per-user traffic ledger."""
+        self.data_file.write_text(
+            json.dumps(data, ensure_ascii=False, separators=(",", ":")),
+            encoding="utf-8",
+        )
 
-    def _safe_date(self, year: int, month: int, day: int) -> date:
-        last_day = calendar.monthrange(year, month)[1]
-        return date(year, month, min(day, last_day))
+    def _period_start(self, today: date | None = None) -> date:
+        """Return the first day of the billing period containing today."""
+        today = today or datetime.now().date()
+        if today.day >= self.net_reset_day:
+            return date(today.year, today.month, self.net_reset_day)
+        if today.month == 1:
+            return date(today.year - 1, 12, self.net_reset_day)
+        return date(today.year, today.month - 1, self.net_reset_day)
 
-    def _get_period_string(self, today: date | None = None) -> str:
-        if today is None:
-            today = datetime.now().date()
+    def _period_string(self, today: date | None = None) -> str:
+        """Format the current accounting period for the command response."""
+        today = today or datetime.now().date()
+        start = self._period_start(today)
+        return f"{start:%Y-%m-%d} 至 {today:%Y-%m-%d}"
 
-        if today.day < self.net_reset_day:
-            if today.month == 1:
-                start_year, start_month = today.year - 1, 12
-            else:
-                start_year, start_month = today.year, today.month - 1
-            start = self._safe_date(start_year, start_month, self.net_reset_day)
-            end = today
+    async def _query_xray_stats(self, *, reset: bool) -> dict[str, dict[str, int]]:
+        """Query Xray user counters and optionally clear Xray's counters.
+
+        Args:
+            reset: Whether Xray should reset counters after returning their values.
+
+        Returns:
+            Traffic bytes grouped by email and direction.
+
+        Raises:
+            RuntimeError: If SSH, the Xray command, or its JSON response fails.
+        """
+        remote_args = [
+            self.xray_command,
+            "api",
+            "statsquery",
+            f"--server={self.xray_api_address}",
+            "--pattern",
+            "user>>>",
+        ]
+        if reset:
+            remote_args.append("--reset")
+
+        if self.xray_ssh_host:
+            destination = self.xray_ssh_host
+            if self.xray_ssh_user:
+                destination = f"{self.xray_ssh_user}@{destination}"
+            command = " ".join(shlex.quote(arg) for arg in remote_args)
+            args = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10"]
+            if self.xray_ssh_port:
+                args.extend(["-p", str(self.xray_ssh_port)])
+            args.extend([destination, command])
         else:
-            start = date(today.year, today.month, self.net_reset_day)
-            end = today
-        return f"{start.strftime('%Y-%m-%d')} 至 {end.strftime('%Y-%m-%d')}"
+            args = remote_args
 
-    def _get_local_traffic(self) -> tuple[float, float]:
-        stats = psutil.net_io_counters(pernic=True)
-        if self.net_iface not in stats:
-            raise RuntimeError(f"网卡 {self.net_iface} 不存在，请修改为实际网卡名")
-        nic = stats[self.net_iface]
-        rx_gb = nic.bytes_recv / 1024 / 1024 / 1024
-        tx_gb = nic.bytes_sent / 1024 / 1024 / 1024
-        return rx_gb, tx_gb
-
-    def _get_remote_traffic_sync(self) -> tuple[float, float]:
-        self.ssh_key_path = self.config.get("ssh_key_path")
-        if not self.net_server or not self.ssh_key_path:
-            return self._get_local_traffic()
-
-        self.ssh_key_path=Path(
-            get_astrbot_plugin_data_path(), "astrbot_plugin_vpstraffic", self.config.get("ssh_key_path", [])[0]
+        process = await asyncio.create_subprocess_exec(
+            *args,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
         )
-        ssh = paramiko.SSHClient()
-        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        ssh.connect(
-            hostname=self.net_server,
-            port=self.ssh_port,
-            username=self.ssh_user,
-            key_filename=str(self.ssh_key_path),
-        )
-        cmd = f"cat /proc/net/dev | grep {self.net_iface}"
-        stdin, stdout, stderr = ssh.exec_command(cmd)
-        line = stdout.read().decode().strip()
-        ssh.close()
-
-        if not line:
-            raise RuntimeError(f"未能读取网卡 {self.net_iface} 的流量信息")
-
-        parts = line.split()
-        rx_bytes = float(parts[1])
-        tx_bytes = float(parts[9])
-        rx_gb = rx_bytes / 1024 / 1024 / 1024
-        tx_gb = tx_bytes / 1024 / 1024 / 1024
-        return rx_gb, tx_gb
-
-    async def _get_remote_traffic(self) -> tuple[float, float]:
-        return await asyncio.to_thread(self._get_remote_traffic_sync)
-
-    async def _reset_job(self) -> None:
-        rx, tx = await self._get_remote_traffic()
-        self._save_data({"base_rx": rx, "base_tx": tx})
-
-    async def _update_clash_userinfo(self) -> None:
         try:
-            rx_gb, tx_gb = await self._get_remote_traffic()
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=20)
+        except TimeoutError:
+            process.kill()
+            await process.wait()
+            raise RuntimeError("Xray traffic query timed out") from None
+
+        if process.returncode:
+            detail = stderr.decode("utf-8", errors="replace").strip()
+            raise RuntimeError(detail or "Xray traffic query failed")
+
+        try:
+            response = json.loads(stdout.decode("utf-8"))
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("Xray returned invalid statistics data") from exc
+
+        users: dict[str, dict[str, int]] = {}
+        for stat in response.get("stat", []):
+            name = stat.get("name", "")
+            parts = name.split(">>>")
+            if len(parts) != 4 or parts[0] != "user" or parts[2] != "traffic":
+                continue
+            email, direction = parts[1], parts[3]
+            if not email or direction not in {"uplink", "downlink"}:
+                continue
+            users.setdefault(email, {"uplink": 0, "downlink": 0})[direction] = int(
+                stat.get("value", 0)
+            )
+        return users
+
+    async def _collect_traffic(self) -> None:
+        """Collect traffic since the previous collection into the current ledger."""
+        async with self._traffic_lock:
+            period_start = self._period_start().isoformat()
             data = self._load_data()
-
-            used_rx_gb = max(0.0, rx_gb - float(data.get("base_rx", 0.0)))
-            used_tx_gb = max(0.0, tx_gb - float(data.get("base_tx", 0.0)))
-
-            download = int(used_rx_gb * 1024**3)
-            upload = int(used_tx_gb * 1024**3)
-
-            today = datetime.now().date()
-            if today.day < self.net_reset_day:
-                year = today.year
-                month = today.month
-            else:
-                if today.month == 12:
-                    year, month = today.year + 1, 1
+            if data.get("period_start") != period_start:
+                if data.get("period_start"):
+                    await self._query_xray_stats(reset=True)
+                    last_counters = {}
                 else:
-                    year, month = today.year, today.month + 1
+                    last_counters = await self._query_xray_stats(reset=False)
+                self._save_data(
+                    {
+                        "period_start": period_start,
+                        "users": {},
+                        "last_counters": last_counters,
+                    }
+                )
+                return
 
-            expire_date = self._safe_date(year, month, self.net_reset_day)
-            expire_ts = int(
-                datetime.combine(expire_date, datetime.max.time()).timestamp()
+            counters = await self._query_xray_stats(reset=False)
+            users = data["users"]
+            last_counters = data.get("last_counters", {})
+            for email, traffic in counters.items():
+                usage = users.setdefault(email, {"uplink": 0, "downlink": 0})
+                previous = last_counters.get(email, {})
+                usage["uplink"] += max(0, traffic["uplink"] - previous.get("uplink", 0))
+                usage["downlink"] += max(
+                    0, traffic["downlink"] - previous.get("downlink", 0)
+                )
+            data["last_counters"] = counters
+            self._save_data(data)
+
+    async def _reset_traffic(self) -> None:
+        """Clear the local ledger and Xray counters at the start of a new period."""
+        async with self._traffic_lock:
+            await self._query_xray_stats(reset=True)
+            self._save_data(
+                {
+                    "period_start": self._period_start().isoformat(),
+                    "users": {},
+                    "last_counters": {},
+                }
             )
 
-            info = {
-                "download": download,
-                "upload": upload,
-                "total": int(self.total_gb * 1024**3),
-                "expire": expire_ts,
-            }
-            self.sub_info_file.write_text(json.dumps(info), encoding="utf-8")
-        except Exception:
-            return
-        
     @filter.command("vps")
     @filter.permission_type(filter.PermissionType.ADMIN)
     async def vps_command(self, event: AstrMessageEvent):
+        """Show the current period's Xray traffic grouped by user email."""
         try:
+            await self._collect_traffic()
             data = self._load_data()
-            rx, tx = await self._get_remote_traffic()
-
-            used_rx = rx - float(data.get("base_rx", 0.0))
-            used_tx = tx - float(data.get("base_tx", 0.0))
-            total = used_rx + used_tx
-
-            period = self._get_period_string(datetime.now().date())
-
-            msg = (
-                "VPS 流量统计\n"
-                f"下行: {used_rx:.2f} GB\n"
-                f"上行: {used_tx:.2f} GB\n"
-                f"总流量: {total:.2f} GB\n"
-                f"统计周期: {period}"
-            )
-        except Exception as e:
-            msg = f"获取流量统计失败：{e}"
+            users = data["users"]
+            lines = ["Xray 用户流量统计", f"统计周期: {self._period_string()}"]
+            if not users:
+                lines.append("暂无已记录的用户流量")
+            else:
+                ordered_users = sorted(
+                    users.items(),
+                    key=lambda item: (
+                        int(item[1].get("uplink", 0)) + int(item[1].get("downlink", 0))
+                    ),
+                    reverse=True,
+                )
+                for email, usage in ordered_users:
+                    uplink = int(usage.get("uplink", 0))
+                    downlink = int(usage.get("downlink", 0))
+                    total = uplink + downlink
+                    lines.append(
+                        f"{email}\n"
+                        f"  下行: {downlink / 1024**3:.2f} GB | "
+                        f"上行: {uplink / 1024**3:.2f} GB | "
+                        f"合计: {total / 1024**3:.2f} GB"
+                    )
+            msg = "\n".join(lines)
+        except Exception as exc:
+            logger.warning("Failed to collect Xray traffic: %s", exc)
+            msg = f"获取 Xray 用户流量失败：{exc}"
 
         yield event.plain_result(msg)

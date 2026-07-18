@@ -1,45 +1,38 @@
 {
-    "net_iface": {
-        "description": "网卡名称",
+    "xray_ssh_host": {
+        "description": "Xray SSH 主机",
         "type": "string",
-        "hint": "例如 eth0 / ens3，需与 /proc/net/dev 中一致。",
+        "hint": "Xray 所在服务器的 SSH 主机名，默认使用 SSH 配置中的 dm。留空则在 AstrBot 本机执行 Xray 命令。",
+        "default": "dm"
+    },
+    "xray_ssh_user": {
+        "description": "Xray SSH 用户名",
+        "type": "string",
+        "hint": "留空时使用 SSH 配置或当前系统用户。",
         "default": ""
     },
-    "net_server": {
-        "description": "远程 VPS 地址",
-        "type": "string",
-        "hint": "留空表示读取本机网卡流量。",
-        "default": ""
-    },
-    "net_reset_day": {
-        "description": "每月重置日",
+    "xray_ssh_port": {
+        "description": "Xray SSH 端口",
         "type": "int",
-        "hint": "每月在该日 23:59 重置流量基线。",
-        "default": 6
-    },
-    "ssh_user": {
-        "description": "SSH 用户名",
-        "type": "string",
-        "hint": "远程读取时使用，默认 root。",
-        "default": "root"
-    },
-    "ssh_port": {
-        "description": "SSH 端口",
-        "type": "int",
-        "hint": "远程读取时使用，默认 22。",
+        "hint": "默认 22。",
         "default": 22
     },
-    "ssh_key_path": {
-        "description": "SSH 私钥",
-        "type": "file",
-        "hint": "默认为空",
-        "default": [],
-        "file_types": ["key","pem"]
+    "xray_api_address": {
+        "description": "Xray API 地址",
+        "type": "string",
+        "hint": "从 SSH 主机访问的 API 地址。",
+        "default": "127.0.0.1:10085"
     },
-    "total_gb": {
-        "description": "订阅总流量 (GB)",
-        "type": "float",
-        "hint": "用于生成 subscription_userinfo.json 的 total 字段。",
-        "default": 1024
+    "xray_command": {
+        "description": "Xray 命令",
+        "type": "string",
+        "hint": "SSH 主机上 Xray 可执行文件的路径或命令名。",
+        "default": "xray"
+    },
+    "net_reset_day": {
+        "description": "每月流量重置日",
+        "type": "int",
+        "hint": "每月该日 00:00 清零本地账本和 Xray 计数器，支持 1 至 28。",
+        "default": 6
     }
 }
